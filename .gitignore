@@ -1,0 +1,18 @@
+.venv/
+build/
+dist/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data. Models are downloaded by the app and must not be packaged or committed.
+data/models/
+data/outputs/
+data/prompts/
+data/real_ui_outputs/
+data/smoke_outputs/
+data/ui_render/
+data/ui_test_outputs/
+*.wav

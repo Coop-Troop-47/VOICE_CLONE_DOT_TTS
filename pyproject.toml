@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-clone-dot-tts"
+version = "0.1.0"
+description = "Portable PyQt desktop application for dots.tts voice cloning."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "PyQt6>=6.7",
+    "huggingface_hub>=0.34",
+    "soundfile>=0.13.1",
+    "numpy>=2.2.6",
+    "dots.tts @ git+https://github.com/rednote-hilab/dots.tts.git",
+    "dots-tts-mlx @ git+https://github.com/sb1992/dots-tts-mlx.git ; platform_system == 'Darwin' and platform_machine == 'arm64'",
+]
+
+[project.optional-dependencies]
+quant = [
+    "torchao>=0.17",
+]
+dev = [
+    "pyinstaller>=6.10",
+    "pytest>=8",
+]
+
+[project.scripts]
+voice-clone-dot-tts = "voice_clone_dot_tts.main:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
