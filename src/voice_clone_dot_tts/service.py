@@ -218,7 +218,7 @@ class DotsTtsService:
             kwargs["cache_dir"] = config.cache_dir
         self._runtime = DotsTtsRuntime.from_pretrained(key[1], **kwargs)
         _move_runtime_to_device(self._runtime, device)
-        _apply_pytorch_quantization(self._runtime, config.quantization)
+        _apply_pytorch_quantization(self._runtime, config.quantization, device=device)
         self._runtime_key = key
         return self._runtime
 
@@ -317,7 +317,6 @@ class DotsTtsService:
                     max_generate_length=request.runtime.max_generate_length,
                 )
         _emit(progress, "MLX finalization: runtime returned audio; converting output tensor")
-        import torch
 
         audio = out["audio"]
         try:
@@ -327,12 +326,16 @@ class DotsTtsService:
 
             audio_array = mx.array(audio).astype(mx.float32)
             mx.eval(audio_array)
-            audio = torch.from_numpy(np.array(audio_array))
+            audio = np.array(audio_array)
         except Exception:
-            audio = torch.as_tensor(audio, dtype=torch.float32)
+            import numpy as np
+
+            audio = np.asarray(audio, dtype=np.float32)
         _emit(progress, "MLX finalization: output tensor ready")
         if audio.ndim == 1:
-            audio = audio.unsqueeze(0)
+            import numpy as np
+
+            audio = np.expand_dims(audio, axis=0)
         sample_rate = int(out.get("sample_rate", 48000))
         elapsed = time.time() - started_at
         audio_seconds = int(audio.shape[-1]) / sample_rate if sample_rate else 0.0
@@ -602,19 +605,32 @@ def _estimate_audio_patch_total(runtime: Any, request: SynthesisRequest) -> int:
     patch_size = int(getattr(config, "patch_size", 8) or 8)
     hop_size = int(getattr(model, "hop_size", 512) or 512)
     sample_rate = int(getattr(runtime, "sample_rate", 48000) or 48000)
-    patch_seconds = max(0.05, (patch_size * hop_size) / sample_rate)
+    patch_seconds = max(0.04, (patch_size * hop_size) / sample_rate)
 
     text = request.text.strip()
     word_count = len(re.findall(r"\w+", text, flags=re.UNICODE))
+    non_space_chars = len(re.sub(r"\s+", "", text))
     if word_count >= 3:
-        estimated_seconds = word_count / 2.45
+        # Cloned speech is usually slower than audiobook narration once pauses,
+        # prompt conditioning, and punctuation are included. Bias high so the UI
+        # does not routinely understate patch count.
+        estimated_seconds = word_count / 1.85
     else:
-        non_space_chars = len(re.sub(r"\s+", "", text))
-        estimated_seconds = non_space_chars / 8.5
-    punctuation_padding = min(3.0, text.count(",") * 0.15 + text.count(".") * 0.25 + text.count(";") * 0.2)
-    estimated_seconds = max(0.8, estimated_seconds + punctuation_padding)
+        estimated_seconds = non_space_chars / 5.8
+    punctuation_padding = min(
+        8.0,
+        text.count(",") * 0.35
+        + text.count(".") * 0.55
+        + text.count(";") * 0.45
+        + text.count(":") * 0.35
+        + text.count("?") * 0.7
+        + text.count("!") * 0.65,
+    )
+    line_padding = max(0, text.count("\n")) * 0.45
+    long_text_padding = non_space_chars / 180.0
+    estimated_seconds = max(1.4, (estimated_seconds + punctuation_padding + line_padding + long_text_padding) * 1.25)
 
-    estimate = int((estimated_seconds + patch_seconds - 1e-9) // patch_seconds)
+    estimate = int((estimated_seconds + patch_seconds - 1e-9) // patch_seconds) + 1
     estimate = max(1, estimate)
     return min(int(request.runtime.max_generate_length), estimate)
 
@@ -622,10 +638,15 @@ def _estimate_audio_patch_total(runtime: Any, request: SynthesisRequest) -> int:
 def _write_audio(audio: Any, sample_rate: int, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.wav"
-    waveform = audio.detach().float().cpu().squeeze()
+    if hasattr(audio, "detach"):
+        waveform = audio.detach().float().cpu().squeeze().numpy()
+    else:
+        import numpy as np
+
+        waveform = np.asarray(audio, dtype=np.float32).squeeze()
     if getattr(waveform, "ndim", 0) == 0:
         raise ValueError("Generated audio is empty.")
-    sf.write(output_path, waveform.numpy(), sample_rate)
+    sf.write(output_path, waveform, sample_rate)
     return output_path
 
 
@@ -719,7 +740,7 @@ def _move_runtime_to_device(runtime: Any, device: str) -> None:
         raise RuntimeError(f"Failed to move dots.tts runtime to {device}: {exc}") from exc
 
 
-def _apply_pytorch_quantization(runtime: Any, quantization: str) -> None:
+def _apply_pytorch_quantization(runtime: Any, quantization: str, *, device: str) -> None:
     normalized = (quantization or "none").strip().lower()
     if normalized == "none":
         return
@@ -736,9 +757,9 @@ def _apply_pytorch_quantization(runtime: Any, quantization: str) -> None:
         raise RuntimeError("Cannot quantize PyTorch runtime because it does not expose a model attribute.")
     try:
         if normalized == "torchao-int8wo":
-            quantize_(model, Int8WeightOnlyConfig())
+            quantize_(model, Int8WeightOnlyConfig(), device=device)
         elif normalized == "torchao-int4wo":
-            quantize_(model, Int4WeightOnlyConfig(group_size=128))
+            quantize_(model, Int4WeightOnlyConfig(group_size=128), device=device)
         else:
             raise RuntimeError(f"Unsupported PyTorch quantization mode: {quantization}")
         if hasattr(model, "eval"):
@@ -776,7 +797,8 @@ def _sampling_progress(
         import dots_tts.models.dots_tts.core as core_module
     except Exception:
         _emit(progress, f"SAMPLING_PATCH 1/{estimated_total} 0/{total_steps}: sampler running")
-        yield
+        with _fallback_sampling_progress(total_steps, method, progress, estimated_total=estimated_total):
+            yield
         _emit(progress, f"SAMPLING_PATCH 1/{estimated_total} {total_steps}/{total_steps}: sampler finished")
         return
 
@@ -816,12 +838,55 @@ def _sampling_progress(
     core_module.odeint = odeint_with_progress
     _emit(progress, f"SAMPLING_PATCH 0/{estimated_total} 0/{total_steps}: {method} sampler starting")
     try:
-        yield
+        with _fallback_sampling_progress(
+            total_steps,
+            method,
+            progress,
+            estimated_total=estimated_total,
+            should_emit=lambda: patch_state["index"] == 0,
+        ):
+            yield
     finally:
         core_module.odeint = original_odeint
         final_patch = max(1, patch_state["index"])
         final_total = max(estimated_total, final_patch)
         _emit(progress, f"SAMPLING_PATCH {final_patch}/{final_total} {total_steps}/{total_steps}: {method} sampler finished")
+
+
+@contextmanager
+def _fallback_sampling_progress(
+    num_steps: int,
+    method: str,
+    progress: ProgressCallback | None,
+    *,
+    estimated_total: int,
+    should_emit: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    if progress is None:
+        yield
+        return
+    total_steps = max(1, int(num_steps))
+    stop_event = threading.Event()
+
+    def emit_progress() -> None:
+        current = 0
+        while not stop_event.wait(0.5):
+            if should_emit is not None and not should_emit():
+                continue
+            current = min(total_steps - 1, current + 1)
+            if current <= 0:
+                continue
+            _emit(progress, f"SAMPLING_PATCH 1/{estimated_total} {current}/{total_steps}: {method} sampler running")
+            if current >= total_steps - 1:
+                current = max(0, total_steps - 2)
+
+    thread = threading.Thread(target=emit_progress, name="dots-tts-progress-fallback", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        thread.join(timeout=1.0)
 
 
 @contextmanager

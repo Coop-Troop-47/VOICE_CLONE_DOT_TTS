@@ -19,9 +19,11 @@ except ModuleNotFoundError as exc:
         "Install the local development environment first:\n"
         "  python -m venv .venv\n"
         "  .venv/bin/python -m pip install -e .[dev]\n\n"
-        "On Windows PowerShell use:\n"
-        "  py -3.12 -m venv .venv\n"
-        "  .\\.venv\\Scripts\\python.exe -m pip install -e .[dev]"
+        "On Windows PowerShell use the conda/micromamba setup because "
+        "dots.tts depends on native pynini/OpenFst packages:\n"
+        "  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass\n"
+        "  .\\scripts\\setup_windows.ps1\n"
+        "  micromamba run -n voice-clone-dot-tts python main.py"
     ) from exc
 
 

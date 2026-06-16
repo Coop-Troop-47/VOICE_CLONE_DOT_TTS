@@ -26,8 +26,10 @@ DEFAULT_MODEL_DIR = DATA_DIR / "models"
 DEFAULT_OUTPUT_DIR = DATA_DIR / "outputs"
 DEFAULT_PROMPTS_DIR = DATA_DIR / "prompts"
 
-DEFAULT_MODEL = "rednote-hilab/dots.tts-soar"
-DEFAULT_MODEL_LABEL = "dots.tts SOAR - PyTorch"
+DEFAULT_SOAR_MODEL = "rednote-hilab/dots.tts-soar"
+DEFAULT_MF_MODEL = "rednote-hilab/dots.tts-mf"
+DEFAULT_MODEL = DEFAULT_MF_MODEL
+DEFAULT_MODEL_LABEL = "dots.tts MeanFlow - PyTorch (consumer GPU)"
 DEFAULT_MLX_MODEL = "shraey/dots-tts-mlx"
 DEFAULT_MLX_MODEL_LABEL = "dots.tts SOAR - MLX int4"
 DEFAULT_BACKEND = "pytorch"
@@ -37,7 +39,7 @@ DEFAULT_QUANTIZATION = "none"
 DEFAULT_EXECUTION_MODE = "generate"
 DEFAULT_TEMPLATE_NAME = "tts"
 DEFAULT_ODE_METHOD = "euler"
-DEFAULT_NUM_STEPS = 32
+DEFAULT_NUM_STEPS = 8
 DEFAULT_GUIDANCE_SCALE = 1.2
 DEFAULT_SPEAKER_SCALE = 1.5
 DEFAULT_MAX_GENERATE_LENGTH = 500
@@ -46,11 +48,18 @@ DEFAULT_OUTPUT_RETENTION = 20
 DEFAULT_UNLOAD_AFTER_GENERATION = True
 
 MODEL_CHOICES = (
-    (DEFAULT_MODEL_LABEL, DEFAULT_MODEL),
+    (DEFAULT_MODEL_LABEL, DEFAULT_MF_MODEL),
+    ("dots.tts SOAR - PyTorch quality", DEFAULT_SOAR_MODEL),
+)
+
+PYTORCH_MODEL_CHOICES = (
+    (DEFAULT_MODEL_LABEL, DEFAULT_MF_MODEL),
+    ("dots.tts SOAR - PyTorch quality", DEFAULT_SOAR_MODEL),
 )
 
 MODEL_DESCRIPTIONS = {
-    DEFAULT_MODEL: "Best PyTorch dots.tts voice cloning checkpoint. Recommended 10-32 steps.",
+    DEFAULT_MF_MODEL: "Official MeanFlow checkpoint distilled from SOAR. Recommended first choice for Windows consumer GPUs.",
+    DEFAULT_SOAR_MODEL: "Highest-quality PyTorch dots.tts voice cloning checkpoint. Recommended when enough VRAM/RAM is available.",
 }
 
 TEMPLATE_CHOICES = (
@@ -62,13 +71,13 @@ TEMPLATE_CHOICES = (
 
 PRECISION_CHOICES = ("bfloat16", "float16", "float32")
 BACKEND_CHOICES = (
-    ("PyTorch / CUDA-CPU", "pytorch"),
-    ("MLX / Apple Silicon", "mlx"),
+    ("PyTorch / Windows NVIDIA or CPU", "pytorch"),
+    ("MLX / Apple Silicon only", "mlx"),
 )
 PYTORCH_QUANTIZATION_CHOICES = (
-    ("None / full PyTorch weights", "none"),
-    ("PyTorch torchao int8 weight-only", "torchao-int8wo"),
-    ("PyTorch torchao int4 weight-only", "torchao-int4wo"),
+    ("None / recommended for MeanFlow", "none"),
+    ("Experimental torchao int8 weight-only", "torchao-int8wo"),
+    ("Experimental torchao int4 weight-only", "torchao-int4wo"),
 )
 MLX_QUANTIZATION_CHOICES = (
     ("MLX int4 - lowest memory", "int4"),
@@ -80,10 +89,10 @@ QUANTIZATION_CHOICES = PYTORCH_QUANTIZATION_CHOICES + MLX_QUANTIZATION_CHOICES
 PYTORCH_QUANTIZATION_VALUES = tuple(value for _, value in PYTORCH_QUANTIZATION_CHOICES)
 MLX_QUANTIZATION_VALUES = tuple(value for _, value in MLX_QUANTIZATION_CHOICES)
 DEVICE_CHOICES = (
-    ("Auto", "auto"),
-    ("CUDA", "cuda"),
+    ("Auto - use NVIDIA GPU when available", "auto"),
+    ("Force NVIDIA GPU (CUDA)", "cuda"),
     ("Apple MPS (unsafe override)", "mps"),
-    ("CPU", "cpu"),
+    ("Force CPU", "cpu"),
 )
 ODE_METHOD_CHOICES = ("euler", "midpoint", "rk4")
 

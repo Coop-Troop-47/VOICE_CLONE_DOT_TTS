@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "voice-clone-dot-tts"
 version = "0.1.0"
-description = "Portable PyQt desktop application for dots.tts voice cloning."
+description = "Portable Qt desktop application for dots.tts voice cloning."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
-    "PyQt6>=6.7",
+    "PySide6>=6.8",
     "huggingface_hub>=0.34",
     "soundfile>=0.13.1",
     "numpy>=2.2.6",

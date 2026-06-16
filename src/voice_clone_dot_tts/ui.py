@@ -10,10 +10,10 @@ import traceback
 from html import escape
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QAction
-from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QThread, Qt, QUrl, Signal
+from PySide6.QtGui import QAction
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -64,6 +65,7 @@ from .constants import (
     MLX_QUANTIZATION_VALUES,
     ODE_METHOD_CHOICES,
     PRECISION_CHOICES,
+    PYTORCH_MODEL_CHOICES,
     PYTORCH_QUANTIZATION_CHOICES,
     PYTORCH_QUANTIZATION_VALUES,
     TEMPLATE_CHOICES,
@@ -82,54 +84,66 @@ from .service import DotsTtsService
 
 HELP_TEXT = {
     "fixed_model": (
-        "This app is intentionally locked to rednote-hilab/dots.tts-soar. Upstream describes SOAR as the "
-        "self-corrective-aligned checkpoint with the best voice cloning performance. The app package does not "
-        "include model weights; download them in-app or choose an existing local SOAR folder."
+        "The selected checkpoint controls the speed, memory, and quality profile. MeanFlow is the practical "
+        "Windows starting point because it is distilled to produce useful speech with far fewer sampler steps. "
+        "That reduces wait time and peak working memory on cards such as an RTX 3070. SOAR remains available "
+        "for quality-first runs, but it normally needs more steps and more temporary memory during generation."
+    ),
+    "pytorch_model": (
+        "Choose which official PyTorch checkpoint to run. MeanFlow is the consumer-hardware option: it trades a "
+        "small amount of maximum quality headroom for much lower latency and lower sampler-step counts. SOAR is "
+        "the full quality model and is better for final renders when the machine has enough VRAM/RAM and longer "
+        "generation time is acceptable."
     ),
     "model_folder": (
-        "Local folder containing the downloaded dots.tts SOAR files. The folder must include config.json, "
-        "model.safetensors, vocoder.safetensors, and speaker_encoder.safetensors. You can use the in-app "
-        "download or browse to an existing Hugging Face snapshot/local-dir download."
+        "Local folder containing the downloaded dots.tts files. PyTorch folders must include config.json, "
+        "model.safetensors, vocoder.safetensors, and speaker_encoder.safetensors. MLX folders use a converted "
+        "variant directory with core/vocoder/speaker weights and a tokenizer. Use Download for the managed path "
+        "or Browse when a compatible Hugging Face snapshot already exists on disk."
     ),
     "download_model": (
-        "Downloads the fixed SOAR checkpoint into this app's model directory. The upstream CLI also accepts a "
-        "local model directory or Hugging Face repo id, but this UI deliberately allows SOAR only."
+        "Downloads the selected checkpoint into this app's user data directory. The app package never contains "
+        "multi-gigabyte model weights, so release builds stay small and users can replace or delete model folders "
+        "without reinstalling the app. The bottom progress bar shows the active download state."
     ),
     "default_model_path": "Restores the standard per-user model directory for this app.",
     "refresh_model": "Rechecks whether the selected local model folder is complete and valid.",
-    "model_status": "Shows whether generation is available and explains what is missing if the model is not ready.",
+    "model_status": (
+        "Shows whether generation is currently allowed. If the folder is incomplete, this tells which required "
+        "file or directory is missing so the fix is clear before loading the model."
+    ),
     "backend": (
-        "Runtime backend. PyTorch is the cross-platform path for Windows/Linux CUDA and CPU and uses the official "
-        "rednote-hilab/dots.tts-soar checkpoint. PyTorch MPS is disabled by default because this model can abort the "
-        "whole app inside Apple's Metal/MPS matmul implementation instead of raising a Python error. MLX is the "
-        "Apple-Silicon GPU path and uses converted shraey/dots-tts-mlx weights. Choose MLX on Mac for lower memory "
-        "and GPU acceleration; choose PyTorch for Windows compatibility, CUDA systems, or CPU fallback."
+        "Runtime backend. On Windows, use PyTorch with CUDA for NVIDIA GPUs such as RTX 3070, or force CPU only "
+        "when GPU memory is unavailable. MLX is only for Apple Silicon Macs and uses separate converted weights."
     ),
     "quantization": (
-        "Backend-specific memory mode. For PyTorch, the torchao int8/int4 entries apply reputable PyTorch runtime "
-        "weight-only quantization to the official SOAR checkpoint after it loads; these are intended for Windows/CUDA "
-        "or CPU experiments and require torchao to be installed. They are not separate Hugging Face model forks. I did "
-        "not find an official or clearly reputable drop-in PyTorch int4/int8 SOAR checkpoint. For MLX, int4 is the "
-        "lowest-memory Apple Silicon SOAR path; int8 is a conservative larger quantized fallback. mf-int4 and mf-int8 "
-        "use the distilled MeanFlow checkpoint; MeanFlow normally works with far fewer flow evaluations, so it is "
-        "faster and lighter, but guidance scale is effectively fused into the distilled model instead of acting like "
-        "SOAR CFG."
+        "Memory mode for the selected backend. For Windows PyTorch, the recommended consumer path is MeanFlow with "
+        "CUDA and fewer sampler steps. The torchao int8/int4 modes are experimental runtime quantization paths; "
+        "they are not separate downloaded checkpoints and may fail on unsupported layers or driver combinations. "
+        "For Apple Silicon MLX, int4/int8 are converted low-memory checkpoints."
     ),
     "unload_after_generation": (
         "Lower-memory mode. When enabled, the app unloads the model and clears CUDA/MPS/MLX caches after each output. "
         "This prevents memory growth across runs and swap pressure, but the next generation must reload the model."
     ),
     "memory_estimate": (
-        "Rough memory expectation for the selected backend. PyTorch SOAR can use far more RAM than the model file size "
-        "because the 2B model, vocoder, speaker encoder, text stack, generated-token state, audio latents, and allocator "
-        "caches all coexist. On Apple Silicon, PyTorch MPS has shown 12-18+ GB peaks and can hard-crash, so Auto skips "
-        "it. MLX int4 uses about 2.4 GB of weights and is expected to peak much lower; MLX int8 uses about 3.1 GB of "
-        "weights. Longer text, longer prompt audio, RK4/more steps, and keeping the model loaded all increase memory pressure."
+        "Memory estimate for the selected setup. The model file is only part of the footprint: generation also needs "
+        "the vocoder, speaker encoder, text state, audio latents, and CUDA allocator memory. Shorter text, MeanFlow, "
+        "Euler sampling, fewer steps, and unloading after each generation reduce pressure on consumer GPUs."
     ),
     "output_dir": "Folder where generated WAV files are written. The app creates it if it does not exist.",
-    "retention": "Maximum number of generated WAV files to keep in the output folder. Set 0 to disable cleanup.",
-    "revision": "Optional Hugging Face revision, branch, tag, or commit to download. Leave blank for the default release.",
-    "cache_dir": "Optional Hugging Face cache directory. Leave blank unless you need downloads stored somewhere specific.",
+    "retention": (
+        "Maximum number of generated WAV files to keep in the output folder. Set 0 to keep every output. Cleanup "
+        "only removes older WAVs created in the output folder; it does not touch model files or reference audio."
+    ),
+    "revision": (
+        "Optional Hugging Face revision, branch, tag, or commit to download. Leave blank for the repository default. "
+        "Use this only when testing a pinned model snapshot or reproducing a specific release."
+    ),
+    "cache_dir": (
+        "Optional Hugging Face cache directory. Leave blank for normal use. Set this when a machine has a separate "
+        "large drive for model cache data or when several local projects should share the same downloaded blobs."
+    ),
     "precision": (
         "Requested runtime precision. PyTorch float16 reduces model-weight memory on CUDA and is the app default for "
         "lower RAM. bfloat16 is often a good CUDA choice and matches the upstream optimized example. float32 is the "
@@ -138,10 +152,9 @@ HELP_TEXT = {
         "int4/int8 setting is the larger memory lever."
     ),
     "device": (
-        "PyTorch device. Auto chooses CUDA when available, then CPU. Apple MPS is deliberately skipped because the "
-        "attached crash report shows a native Metal/MPS abort in PyTorch matmul; Python cannot catch that kind of "
-        "process abort. Use MLX for Apple Silicon GPU acceleration. The Apple MPS entry is only for unsupported "
-        "debugging and requires launching with VOICE_CLONE_DOT_TTS_ALLOW_PYTORCH_MPS=1."
+        "PyTorch device. Auto uses an NVIDIA CUDA GPU when PyTorch can see one, then falls back to CPU. Force NVIDIA "
+        "GPU is useful when a CUDA-capable card is expected and CPU fallback would be too slow. Force CPU is useful "
+        "for troubleshooting or machines without enough VRAM."
     ),
     "optimize": (
         "Enables torch.compile warmup when supported. Upstream notes that optimize makes first launch slower "
@@ -152,12 +165,19 @@ HELP_TEXT = {
         "generate is the normal high-quality path. generate_stream yields audio chunks with the same generation "
         "arguments and is mainly useful for lower-latency playback/client streaming."
     ),
-    "template": "dots.tts prompt template. TTS is the normal voice cloning path.",
+    "template": (
+        "dots.tts prompt template. TTS is the normal voice cloning path. The other template is exposed for upstream "
+        "compatibility and experimentation, but normal cloned-speech generation should stay on TTS."
+    ),
     "language": (
         "Optional language tag. Upstream supports none, auto_detect, language codes like EN/ZH, and names like "
         "english/chinese. Useful for multilingual or code-switched text."
     ),
-    "normalize": "Runs WeTextProcessing text normalization before inference. Useful for numbers, dates, punctuation, and mixed-language text.",
+    "normalize": (
+        "Runs WeTextProcessing text normalization before inference. This can improve numbers, dates, punctuation, "
+        "and mixed-language text, but it adds the pynini/OpenFst dependency on Windows and is not supported by the "
+        "MLX backend path."
+    ),
     "ode": (
         "PyTorch ODE sampler. Euler is the default and is the best speed/memory baseline: one DiT evaluation per step. "
         "Midpoint evaluates about twice per step, which can smooth the trajectory but costs roughly 2x sampler work. "
@@ -166,16 +186,18 @@ HELP_TEXT = {
         "solver path, so this control is mainly for PyTorch SOAR."
     ),
     "num_steps": (
-        "Flow-matching sampling steps shown as Sampler 0/N through N/N during generation. The app defaults to 32 for "
-        "highest SOAR quality. 10-16 is faster and lower memory; 32 is slower but usually cleaner and more stable. "
-        "MeanFlow MLX variants are distilled for very low NFE, commonly around 4, so using 32 there trades speed for "
-        "little expected benefit."
+        "Sampler steps control how much refinement happens before the WAV is written. MeanFlow is designed for low "
+        "step counts, so 4-8 is a good starting point. SOAR usually benefits from 16-32 steps but takes longer and "
+        "uses more working memory."
     ),
     "guidance": (
         "Classifier-free guidance scale. Upstream default is 1.2 and warns that values above 2 progressively "
         "amplify audio energy. Increase cautiously."
     ),
-    "speaker": "Voice cloning strength. Higher values push closer to the reference speaker but can increase artifacts.",
+    "speaker": (
+        "Voice cloning strength. Higher values push the generated speech closer to the reference speaker. Very high "
+        "values can overfit the prompt and may create artifacts, unstable tone, or less natural pronunciation."
+    ),
     "seed": (
         "Deterministic RNG seed. Fixed seed gives repeatable output; changing the seed explores different rhythm "
         "and intonation for the same text/reference."
@@ -192,15 +214,27 @@ HELP_TEXT = {
         "Exact transcript of the reference audio. Upstream recommends prompt audio plus matching prompt text "
         "for best speaker similarity. Transcript mismatches degrade stability and can cause word-level errors."
     ),
-    "synthesis_text": "The text to speak in the cloned voice.",
-    "generate": "Starts synthesis after validating the model folder, text, prompt audio, and output folder.",
+    "synthesis_text": (
+        "The text to speak in the cloned voice. Short tests are best while tuning model, device, precision, and "
+        "steps. Longer text creates more latent audio patches and increases total generation time."
+    ),
+    "generate": (
+        "Starts synthesis after validating the model folder, speech text, optional reference audio, and output "
+        "folder. Progress is reported in the step bar, sampler bar, ETA label, and Log tab. If generation fails, "
+        "the progress indicators reset and the error remains visible."
+    ),
     "sampler_progress": (
         "Shows audio-patch and sampler progress. dots.tts generates one latent audio patch at a time, and each patch "
         "runs its own flow-matching solve, so a single WAV can legitimately show Patch 1 sampler 1/32, Patch 2 sampler "
         "1/32, and so on. The patch total is estimated from text length and model patch duration, then adjusted upward "
         "if generation exceeds the estimate. ETA is calculated from the average time per observed sampler step."
     ),
-    "play": "Plays the most recently generated WAV inside the app.",
+    "play": "Plays the most recently generated WAV inside the app. The generated-audio scrubber can seek within the output.",
+    "audio_scrubber": (
+        "Playback and scrubbing for the selected audio file. Use Play/Pause to preview, drag the slider to seek, "
+        "and Stop to return to the beginning. The reference control previews input audio; the generated control "
+        "previews the latest output WAV."
+    ),
     "open_output": "Opens the output folder in Finder, Explorer, or the platform file manager.",
     "guide": "Opens the built-in guide tab with setup, cloning, quality, memory, and troubleshooting notes.",
     "diagnostics": "Writes local app, model, output, and device diagnostics to the Log tab without loading the model.",
@@ -210,27 +244,28 @@ GUIDE_SECTIONS = (
     (
         "Start",
         (
-            "1. Download the fixed rednote-hilab/dots.tts-soar model or browse to an existing local SOAR folder.",
-            "2. Choose a clean reference voice clip and enter its exact transcript when available.",
-            "3. Enter the speech text, keep the default quality settings, then press Generate.",
+            "On Windows consumer GPUs, start with the MeanFlow PyTorch checkpoint and Auto or Force NVIDIA GPU.",
+            "Download the selected checkpoint or browse to an existing compatible local folder.",
+            "Choose a clean reference voice clip and enter its exact transcript when available.",
+            "Enter the speech text, keep the default MeanFlow settings, then press Generate.",
         ),
     ),
     (
         "Model Rules",
         (
-            "This app supports only dots.tts SOAR: the official PyTorch rednote-hilab/dots.tts-soar checkpoint and the Apple Silicon MLX conversion of that model.",
+            "This app supports the official PyTorch dots.tts MeanFlow and SOAR checkpoints, plus Apple Silicon MLX converted weights.",
             "The packaged app does not include model weights; this keeps the app distributable and lets users download the model on demand.",
             "A valid PyTorch model folder must contain config.json, model.safetensors, vocoder.safetensors, and speaker_encoder.safetensors.",
             "A valid MLX model folder must contain the selected int4/int8/mf variant files plus its tokenizer directory.",
-            "On Mac, MLX is the supported GPU route. PyTorch MPS is blocked by default because this model can crash in Metal before Python can handle the error.",
+            "On Windows, PyTorch CUDA is the supported GPU route. On Mac, MLX is the supported GPU route.",
         ),
     ),
     (
         "Quality Defaults",
         (
-            "The default PyTorch path is non-streaming generation with 32 sampling steps and float16 on CUDA.",
+            "The default PyTorch path is MeanFlow, non-streaming generation, 8 sampling steps, and float16 on CUDA.",
             "Auto device selection uses CUDA first, then CPU. It skips Apple MPS unless VOICE_CLONE_DOT_TTS_ALLOW_PYTORCH_MPS=1 is set.",
-            "Increasing sampling steps can improve stability but increases generation time; RK4 multiplies sampler work and memory pressure.",
+            "Increasing sampling steps can improve stability but increases generation time. Use SOAR with 16-32 steps for quality-first runs.",
         ),
     ),
     (
@@ -262,16 +297,28 @@ GUIDE_SECTIONS = (
 
 
 def create_app(argv: list[str]) -> QApplication:
+    _configure_qt_font_dir()
     app = QApplication(argv)
     app.setApplicationName("Voice Clone dots.tts")
     app.setOrganizationName("Voice Clone dots.tts")
     return app
 
 
+def _configure_qt_font_dir() -> None:
+    if os.environ.get("QT_QPA_FONTDIR"):
+        return
+    if not sys.platform.startswith("win"):
+        return
+    windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    font_dir = windows_dir / "Fonts"
+    if font_dir.is_dir():
+        os.environ["QT_QPA_FONTDIR"] = str(font_dir)
+
+
 class SynthesisWorker(QThread):
-    progress = pyqtSignal(str)
-    succeeded = pyqtSignal(object)
-    failed = pyqtSignal(str, str)
+    progress = Signal(str)
+    succeeded = Signal(object)
+    failed = Signal(str, str)
 
     def __init__(self, service: DotsTtsService, request: SynthesisRequest) -> None:
         super().__init__()
@@ -288,9 +335,9 @@ class SynthesisWorker(QThread):
 
 
 class ModelDownloadWorker(QThread):
-    progress = pyqtSignal(str)
-    succeeded = pyqtSignal(str)
-    failed = pyqtSignal(str, str)
+    progress = Signal(str)
+    succeeded = Signal(str)
+    failed = Signal(str, str)
 
     def __init__(self, repo_id: str, revision: str | None, *, backend: str = "pytorch", quantization: str = "none") -> None:
         super().__init__()
@@ -319,6 +366,124 @@ class ModelDownloadWorker(QThread):
         self.succeeded.emit(str(path))
 
 
+class AudioPlaybackControl(QWidget):
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._path: Path | None = None
+        self._duration_ms = 0
+        self._seeking = False
+        self._player = QMediaPlayer(self)
+        self._audio_output = QAudioOutput(self)
+        self._player.setAudioOutput(self._audio_output)
+        self._audio_output.setVolume(0.9)
+
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 2, 0, 0)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(4)
+
+        self.title_label = QLabel(title)
+        self.title_label.setWordWrap(True)
+        attach_help(self.title_label, "audio_scrubber")
+        self.play_button = QPushButton("Play")
+        attach_help(self.play_button, "audio_scrubber")
+        self.play_button.clicked.connect(self._toggle_playback)
+        self.stop_button = QPushButton("Stop")
+        attach_help(self.stop_button, "audio_scrubber")
+        self.stop_button.clicked.connect(self.stop)
+        self.position_slider = QSlider(Qt.Orientation.Horizontal)
+        self.position_slider.setRange(0, 0)
+        self.position_slider.setEnabled(False)
+        attach_help(self.position_slider, "audio_scrubber")
+        self.time_label = QLabel("0:00 / 0:00")
+        self.time_label.setMinimumWidth(72)
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        attach_help(self.time_label, "audio_scrubber")
+
+        layout.addWidget(self.title_label, 0, 0, 1, 3)
+        layout.addWidget(self.play_button, 1, 0)
+        layout.addWidget(self.stop_button, 1, 1)
+        layout.addWidget(self.time_label, 1, 2)
+        layout.addWidget(self.position_slider, 2, 0, 1, 3)
+        layout.setColumnStretch(2, 1)
+
+        self.position_slider.sliderPressed.connect(self._begin_seek)
+        self.position_slider.sliderReleased.connect(self._finish_seek)
+        self.position_slider.sliderMoved.connect(self._preview_seek)
+        self._player.durationChanged.connect(self._duration_changed)
+        self._player.positionChanged.connect(self._position_changed)
+        self._player.playbackStateChanged.connect(self._playback_state_changed)
+        self.set_source(None)
+
+    def set_source(self, path: str | Path | None) -> None:
+        candidate = Path(path).expanduser() if path else None
+        if candidate is None or not candidate.is_file():
+            self._path = None
+            self._duration_ms = 0
+            self._player.stop()
+            self._player.setSource(QUrl())
+            self.position_slider.setRange(0, 0)
+            self.position_slider.setValue(0)
+            self.position_slider.setEnabled(False)
+            self.play_button.setEnabled(False)
+            self.stop_button.setEnabled(False)
+            self.play_button.setText("Play")
+            self.time_label.setText("0:00 / 0:00")
+            return
+        self._path = candidate
+        self._duration_ms = 0
+        self._player.stop()
+        self._player.setSource(QUrl.fromLocalFile(str(candidate)))
+        self.position_slider.setRange(0, 0)
+        self.position_slider.setValue(0)
+        self.position_slider.setEnabled(True)
+        self.play_button.setEnabled(True)
+        self.stop_button.setEnabled(True)
+        self.play_button.setText("Play")
+        self.time_label.setText("0:00 / 0:00")
+
+    def stop(self) -> None:
+        self._player.stop()
+        self._player.setPosition(0)
+        self.position_slider.setValue(0)
+
+    def play(self) -> None:
+        if self._path is not None:
+            self._player.play()
+
+    def _toggle_playback(self) -> None:
+        if self._path is None:
+            return
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+        else:
+            self._player.play()
+
+    def _begin_seek(self) -> None:
+        self._seeking = True
+
+    def _finish_seek(self) -> None:
+        self._seeking = False
+        self._player.setPosition(self.position_slider.value())
+
+    def _preview_seek(self, value: int) -> None:
+        self.time_label.setText(f"{format_media_time(value)} / {format_media_time(self._duration_ms)}")
+
+    def _duration_changed(self, duration_ms: int) -> None:
+        self._duration_ms = max(0, int(duration_ms))
+        self.position_slider.setRange(0, self._duration_ms)
+        self.position_slider.setEnabled(self._path is not None and self._duration_ms > 0)
+        self.time_label.setText(f"{format_media_time(self._player.position())} / {format_media_time(self._duration_ms)}")
+
+    def _position_changed(self, position_ms: int) -> None:
+        if not self._seeking:
+            self.position_slider.setValue(max(0, int(position_ms)))
+        self.time_label.setText(f"{format_media_time(position_ms)} / {format_media_time(self._duration_ms)}")
+
+    def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        self.play_button.setText("Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play")
+
+
 def help_text(key: str) -> str:
     return HELP_TEXT.get(key, "")
 
@@ -337,8 +502,9 @@ def help_button(parent: QWidget, title: str, key: str) -> QToolButton:
     button.setAutoRaise(True)
     button.setCursor(Qt.CursorShape.WhatsThisCursor)
     button.setFixedSize(20, 20)
-    button.setToolTip(help_text(key))
-    button.setAccessibleName(f"Help for {title}")
+    button.setToolTip(f"More info: {title}")
+    button.setAccessibleName(f"More info for {title}")
+    button.setAccessibleDescription(help_text(key))
     button.setStyleSheet(
         """
         QToolButton {
@@ -419,10 +585,6 @@ class MainWindow(QMainWindow):
         self._sampler_started_at: float | None = None
         self._last_sampler_completed_units = 0
         self._last_sampler_total_units = 0
-        self._player = QMediaPlayer(self)
-        self._audio_output = QAudioOutput(self)
-        self._player.setAudioOutput(self._audio_output)
-        self._audio_output.setVolume(0.9)
 
         self._build_actions()
         self._build_ui()
@@ -450,12 +612,27 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_work_panel())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([460, 820])
+        splitter.setSizes([400, 880])
         splitter.setChildrenCollapsible(False)
         layout.addWidget(splitter, 1)
 
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setContentsMargins(0, 0, 0, 0)
         self.status_label = QLabel("Ready")
-        layout.addWidget(self.status_label)
+        self.status_label.setWordWrap(True)
+        self.download_progress_label = QLabel("Download: idle")
+        self.download_progress_label.setMinimumWidth(170)
+        self.download_progress_bar = QProgressBar()
+        self.download_progress_bar.setRange(0, 100)
+        self.download_progress_bar.setValue(0)
+        self.download_progress_bar.setFormat("%p%")
+        self.download_progress_bar.setMaximumWidth(260)
+        attach_help(self.download_progress_label, "download_model")
+        attach_help(self.download_progress_bar, "download_model")
+        bottom_bar.addWidget(self.status_label, 1)
+        bottom_bar.addWidget(self.download_progress_label)
+        bottom_bar.addWidget(self.download_progress_bar)
+        layout.addLayout(bottom_bar)
         self.setCentralWidget(root)
 
     def _build_settings_panel(self) -> QWidget:
@@ -477,6 +654,14 @@ class MainWindow(QMainWindow):
         self.backend_combo.currentIndexChanged.connect(self._backend_changed)
         add_option_row(runtime_form, runtime_group, "Backend", self.backend_combo, "backend")
 
+        self.pytorch_model_combo = QComboBox()
+        for label, value in PYTORCH_MODEL_CHOICES:
+            self.pytorch_model_combo.addItem(label, value)
+        default_model_index = self.pytorch_model_combo.findData(DEFAULT_MODEL)
+        self.pytorch_model_combo.setCurrentIndex(default_model_index if default_model_index >= 0 else 0)
+        self.pytorch_model_combo.currentIndexChanged.connect(self._pytorch_model_changed)
+        add_option_row(runtime_form, runtime_group, "PyTorch Checkpoint", self.pytorch_model_combo, "pytorch_model")
+
         self.quantization_combo = QComboBox()
         self._populate_quantization_combo(DEFAULT_BACKEND, DEFAULT_QUANTIZATION)
         self.quantization_combo.currentIndexChanged.connect(self._quantization_changed)
@@ -489,7 +674,7 @@ class MainWindow(QMainWindow):
 
         self.model_path_edit = QLineEdit(str(local_model_path(DEFAULT_MODEL)))
         self.model_path_edit.setMinimumWidth(0)
-        self.model_path_edit.setPlaceholderText("Choose a local rednote-hilab/dots.tts-soar folder")
+        self.model_path_edit.setPlaceholderText("Choose a local dots.tts PyTorch model folder")
         self.model_path_edit.textChanged.connect(self._refresh_model_status)
         self.choose_model_button = QPushButton("Browse")
         attach_help(self.choose_model_button, "model_folder")
@@ -670,6 +855,7 @@ class MainWindow(QMainWindow):
         self.prompt_audio_edit.setPlaceholderText(
             "Reference audio for voice cloning. WAV, MP3, FLAC, M4A, and OGG are supported."
         )
+        self.prompt_audio_edit.textChanged.connect(self._prompt_audio_changed)
         self.prompt_audio_button = QPushButton("Choose Audio")
         attach_help(self.prompt_audio_button, "prompt_audio")
         self.prompt_audio_button.clicked.connect(self._choose_prompt_audio)
@@ -683,6 +869,8 @@ class MainWindow(QMainWindow):
         prompt_audio_row.setColumnStretch(0, 1)
         prompt_audio_row.setColumnStretch(1, 1)
         add_option_row(prompt_form, prompt_group, "Prompt Audio", prompt_audio_row, "prompt_audio")
+        self.prompt_audio_player = AudioPlaybackControl("Reference preview", prompt_group)
+        prompt_layout.addWidget(self.prompt_audio_player)
 
         self.prompt_text_edit = QPlainTextEdit()
         self.prompt_text_edit.setPlaceholderText(
@@ -718,6 +906,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.open_output_button, 1, 0, 1, 2)
         controls.setColumnStretch(0, 1)
         controls.setColumnStretch(1, 1)
+        self.generated_audio_player = AudioPlaybackControl("Generated audio", panel)
 
         progress_row = QHBoxLayout()
         self.step_counter_label = QLabel("Step 0/6: Ready")
@@ -729,7 +918,7 @@ class MainWindow(QMainWindow):
         progress_row.addWidget(self.step_progress, 1)
 
         sampler_row = QHBoxLayout()
-        self.sampler_counter_label = QLabel("Sampler 0/32: Ready")
+        self.sampler_counter_label = QLabel(f"Sampler 0/{DEFAULT_NUM_STEPS}: Ready")
         self.sampler_counter_label.setWordWrap(True)
         attach_help(self.sampler_counter_label, "sampler_progress")
         self.sampler_progress = QProgressBar()
@@ -760,6 +949,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(prompt_group)
         layout.addWidget(text_group, 1)
         layout.addLayout(controls)
+        layout.addWidget(self.generated_audio_player)
         layout.addLayout(progress_row)
         layout.addLayout(sampler_row)
         layout.addLayout(eta_row)
@@ -798,7 +988,7 @@ class MainWindow(QMainWindow):
         model_path = self._selected_model_path()
         validation_error = local_model_validation_error(model_path, backend=backend)
         if validation_error is not None:
-            raise ValueError(f"Choose a valid local dots.tts SOAR model folder first. {validation_error}")
+            raise ValueError(f"Choose a valid local dots.tts model folder first. {validation_error}")
         language = combo_value_or_text(self.language_combo)
         runtime = RuntimeConfig(
             backend=backend,  # type: ignore[arg-type]
@@ -834,12 +1024,17 @@ class MainWindow(QMainWindow):
 
     def _generation_succeeded(self, result: SynthesisResult) -> None:
         self._last_audio_path = result.audio_path
+        self.generated_audio_player.set_source(result.audio_path)
         self.metrics_edit.setPlainText(json.dumps(result.metrics, indent=2, sort_keys=True))
         self._append_log(f"Done: {result.audio_path}")
         self.status_label.setText(f"Ready: {result.audio_path.name}")
 
     def _generation_failed(self, message: str, details: str = "") -> None:
         self._append_log(f"Failed: {message}")
+        self._set_step_counter(0, 6, f"Error: {message}")
+        self._set_sampler_counter(0, self.num_steps_spin.value(), "Stopped after error")
+        self._reset_generation_eta()
+        self.eta_label.setText("ETA: stopped after error")
         if details:
             self._append_log("")
             self._append_log("Diagnostic traceback:")
@@ -867,7 +1062,8 @@ class MainWindow(QMainWindow):
         self.use_default_model_button.setEnabled(not running)
         self.refresh_model_button.setEnabled(not running)
         self.backend_combo.setEnabled(not running)
-        self.quantization_combo.setEnabled(not running and self._selected_backend() == "mlx")
+        self.pytorch_model_combo.setEnabled(not running and self._selected_backend() == "pytorch")
+        self.quantization_combo.setEnabled(not running)
         self.precision_combo.setEnabled(not running)
         self.unload_runtime_check.setEnabled(not running)
         if running:
@@ -878,12 +1074,40 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         self._update_step_counter_from_message(message)
 
+    def _download_progress(self, message: str) -> None:
+        self._append_log(message)
+        lowered = message.lower()
+        if "ready" in lowered or "complete" in lowered:
+            self._set_download_progress(False, "Download complete", value=100)
+        elif "download" in lowered:
+            self._set_download_progress(True, "Downloading model", indeterminate=True)
+        else:
+            self._set_download_progress(True, "Preparing model download", indeterminate=True)
+
+    def _set_download_progress(
+        self,
+        active: bool,
+        label: str,
+        *,
+        value: int = 0,
+        indeterminate: bool = False,
+    ) -> None:
+        self.download_progress_label.setText(label)
+        if active and indeterminate:
+            self.download_progress_bar.setRange(0, 0)
+            self.download_progress_bar.setFormat("Working")
+            return
+        self.download_progress_bar.setRange(0, 100)
+        self.download_progress_bar.setValue(max(0, min(100, int(value))))
+        self.download_progress_bar.setFormat("%p%" if value else "")
+
     def _download_selected_model(self) -> None:
         if self._worker is not None or self._download_worker is not None:
             return
         backend = self._selected_backend()
-        repo_id = DEFAULT_MLX_MODEL if backend == "mlx" else DEFAULT_MODEL
+        repo_id = DEFAULT_MLX_MODEL if backend == "mlx" else self._selected_pytorch_model()
         self._append_log(f"Downloading fixed {backend} model: {repo_id}")
+        self._set_download_progress(True, f"Downloading {repo_id}", indeterminate=True)
         revision = self.revision_edit.text().strip() or None
         self._download_worker = ModelDownloadWorker(
             repo_id,
@@ -891,7 +1115,7 @@ class MainWindow(QMainWindow):
             backend=backend,
             quantization=self._selected_quantization(),
         )
-        self._download_worker.progress.connect(self._append_log)
+        self._download_worker.progress.connect(self._download_progress)
         self._download_worker.succeeded.connect(self._model_download_succeeded)
         self._download_worker.failed.connect(self._model_download_failed)
         self._download_worker.finished.connect(self._download_worker_finished)
@@ -901,10 +1125,12 @@ class MainWindow(QMainWindow):
     def _model_download_succeeded(self, path: str) -> None:
         self.model_path_edit.setText(path)
         self._append_log(f"Model downloaded: {path}")
+        self._set_download_progress(False, "Download complete", value=100)
         self._refresh_model_status()
 
     def _model_download_failed(self, message: str, details: str = "") -> None:
         self._append_log(f"Model download failed: {message}")
+        self._set_download_progress(False, "Download failed", value=0)
         if details:
             self._append_log("")
             self._append_log("Diagnostic traceback:")
@@ -950,6 +1176,9 @@ class MainWindow(QMainWindow):
     def _selected_backend(self) -> str:
         return str(self.backend_combo.currentData() or "pytorch")
 
+    def _selected_pytorch_model(self) -> str:
+        return str(self.pytorch_model_combo.currentData() or DEFAULT_MODEL)
+
     def _selected_quantization(self) -> str:
         value = str(self.quantization_combo.currentData() or "none")
         if self._selected_backend() == "pytorch":
@@ -959,12 +1188,12 @@ class MainWindow(QMainWindow):
     def _default_model_path(self) -> Path:
         if self._selected_backend() == "mlx":
             return local_mlx_model_path(self._selected_quantization())
-        return local_model_path(DEFAULT_MODEL)
+        return local_model_path(self._selected_pytorch_model())
 
     def _choose_model_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(
             self,
-            "Choose Local dots.tts SOAR Model Folder",
+            "Choose Local dots.tts Model Folder",
             str(self._selected_model_path()),
         )
         if path:
@@ -975,16 +1204,23 @@ class MainWindow(QMainWindow):
         backend = self._selected_backend()
         previous_quantization = str(self.quantization_combo.currentData() or "")
         self._populate_quantization_combo(backend, previous_quantization)
+        self.pytorch_model_combo.setEnabled(backend == "pytorch")
         self.quantization_combo.setEnabled(True)
         self.device_combo.setEnabled(backend == "pytorch")
         self.optimize_check.setEnabled(backend == "pytorch")
         self.streaming_check.setEnabled(backend == "pytorch")
         self.model_name_label.setText(
-            f"{DEFAULT_MODEL_LABEL}\n{DEFAULT_MODEL}"
+            f"{self.pytorch_model_combo.currentText()}\n{self._selected_pytorch_model()}"
             if backend == "pytorch"
             else f"dots.tts SOAR - MLX\n{DEFAULT_MLX_MODEL}/{self._selected_quantization()}"
         )
         self.model_path_edit.setText(str(self._default_model_path()))
+        self._refresh_model_status()
+
+    def _pytorch_model_changed(self, *_args) -> None:
+        if self._selected_backend() == "pytorch":
+            self.model_name_label.setText(f"{self.pytorch_model_combo.currentText()}\n{self._selected_pytorch_model()}")
+            self.model_path_edit.setText(str(self._default_model_path()))
         self._refresh_model_status()
 
     def _quantization_changed(self, *_args) -> None:
@@ -1029,15 +1265,19 @@ class MainWindow(QMainWindow):
         if path:
             self.prompt_audio_edit.setText(path)
 
+    def _prompt_audio_changed(self, text: str) -> None:
+        self.prompt_audio_player.set_source(text.strip() or None)
+
     def _clear_prompt(self) -> None:
         self.prompt_audio_edit.clear()
         self.prompt_text_edit.clear()
+        self.prompt_audio_player.set_source(None)
 
     def _play_last(self) -> None:
         if self._last_audio_path is None:
             return
-        self._player.setSource(QUrl.fromLocalFile(str(self._last_audio_path)))
-        self._player.play()
+        self.generated_audio_player.set_source(self._last_audio_path)
+        self.generated_audio_player.play()
 
     def _open_output_folder(self) -> None:
         path = Path(self.output_dir_edit.text()).expanduser()
@@ -1132,13 +1372,15 @@ class MainWindow(QMainWindow):
         elapsed = max(0.001, now - self._sampler_started_at)
         seconds_per_unit = elapsed / completed_units
         remaining_units = max(0, total_units - completed_units)
-        eta_seconds = remaining_units * seconds_per_unit
+        eta_safety_factor = 1.35 if completed_units < max(8, step_total) else 1.2
+        finalization_padding = 8.0 if remaining_units > 0 else 0.0
+        eta_seconds = remaining_units * seconds_per_unit * eta_safety_factor + finalization_padding
         self._last_sampler_completed_units = completed_units
         self._last_sampler_total_units = total_units
         if hasattr(self, "eta_label"):
             self.eta_label.setText(
                 f"ETA: ~{format_duration(eta_seconds)} left "
-                f"({completed_units}/{total_units} sampler steps observed, {seconds_per_unit:.2f}s/step)"
+                f"({completed_units}/{total_units} estimated sampler steps, {seconds_per_unit:.2f}s/step observed)"
             )
 
     def _update_step_counter_from_message(self, message: str) -> None:
@@ -1195,7 +1437,7 @@ def combo_value_or_text(combo: QComboBox) -> str:
 def build_guide_html() -> str:
     parts = [
         "<h2>Voice Clone dots.tts Guide</h2>",
-        "<p>This app is built for <b>rednote-hilab/dots.tts-soar</b> only.</p>",
+        "<p>This app supports official dots.tts PyTorch checkpoints for Windows/Linux and MLX converted weights for Apple Silicon.</p>",
     ]
     for title, bullets in GUIDE_SECTIONS:
         parts.append(f"<h3>{escape(title)}</h3>")
@@ -1222,14 +1464,14 @@ def estimate_memory_text(backend: str, quantization: str, precision: str) -> str
         }
         return estimates.get(quantization, estimates["int4"])
     if quantization == "torchao-int8wo":
-        return "PyTorch torchao int8 weight-only: experimental Windows/CUDA/CPU memory mode; can reduce Linear weight memory but may not accelerate every layer."
+        return "Experimental PyTorch int8 weight-only: can reduce some Linear layer weight memory, but compatibility depends on torchao, GPU driver, and model layers. MeanFlow with CUDA is the recommended consumer setting."
     if quantization == "torchao-int4wo":
-        return "PyTorch torchao int4 weight-only: most aggressive experimental PyTorch memory mode; support depends on torchao, device, and layer coverage."
+        return "Experimental PyTorch int4 weight-only: most aggressive memory option and most likely to hit unsupported layers. Use only after the recommended MeanFlow CUDA path is working."
     if precision == "float16":
-        return "PyTorch float16: lower model weight memory on CUDA. On Mac, Auto skips MPS because it can hard-crash; CPU falls back to float32 and may be slow/high RAM."
+        return "PyTorch float16: recommended for NVIDIA GPUs such as RTX 3070. The model loads through system RAM, then runs on CUDA when the selected device is Auto or Force NVIDIA GPU."
     if precision == "bfloat16":
-        return "PyTorch bfloat16: good CUDA choice and upstream-friendly. On Mac, use MLX int4/int8 for GPU acceleration instead of PyTorch MPS."
-    return "PyTorch float32: highest compatibility but largest memory footprint; CPU peaks can still be well above the weight file size."
+        return "PyTorch bfloat16: good on newer CUDA cards with strong bfloat16 support. RTX 3070 usually favors float16."
+    return "PyTorch float32: highest compatibility but largest memory footprint. Use mainly for CPU troubleshooting."
 
 
 def format_duration(seconds: float) -> str:
@@ -1241,6 +1483,15 @@ def format_duration(seconds: float) -> str:
         return f"{minutes}m {seconds:02d}s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h {minutes:02d}m"
+
+
+def format_media_time(milliseconds: int) -> str:
+    total_seconds = max(0, int(milliseconds // 1000))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def build_diagnostics(model_path: Path, output_dir: Path, backend: str = "pytorch", quantization: str = "none") -> list[str]:
@@ -1255,9 +1506,10 @@ def build_diagnostics(model_path: Path, output_dir: Path, backend: str = "pytorc
         f"Quantization: {quantization}",
         f"Model path: {model_path}",
         f"Model ready: {model_error is None}",
-        f"Model status: {model_error or 'valid local SOAR folder'}",
+        f"Model status: {model_error or 'valid local model folder'}",
         f"Output dir: {output_dir}",
         f"Output parent writable: {output_parent.exists() and os.access(output_parent, os.W_OK)}",
+        "Built-in playback available: True",
     ]
     try:
         import torch
@@ -1268,6 +1520,8 @@ def build_diagnostics(model_path: Path, output_dir: Path, backend: str = "pytorc
             [
                 f"Torch: {getattr(torch, '__version__', 'unknown')}",
                 f"CUDA available: {torch.cuda.is_available()}",
+                f"CUDA device count: {torch.cuda.device_count() if torch.cuda.is_available() else 0}",
+                f"CUDA device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'not available'}",
                 f"Apple MPS available: {mps_available}",
                 f"PyTorch MPS override enabled: {os.environ.get('VOICE_CLONE_DOT_TTS_ALLOW_PYTORCH_MPS') == '1'}",
             ]

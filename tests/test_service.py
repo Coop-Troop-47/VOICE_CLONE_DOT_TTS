@@ -13,6 +13,7 @@ from voice_clone_dot_tts.models import RuntimeConfig, SynthesisRequest
 from voice_clone_dot_tts.service import (
     DotsTtsOperationError,
     DotsTtsService,
+    _estimate_audio_patch_total,
     _select_device,
     _mlx_sampling_progress,
     cleanup_outputs,
@@ -367,13 +368,48 @@ def test_synthesize_reports_sampler_progress(monkeypatch, tmp_path: Path) -> Non
     messages: list[str] = []
 
     DotsTtsService().synthesize(
-        SynthesisRequest(text="hello", execution_mode="generate", output_dir=tmp_path),
+        SynthesisRequest(text="hello", execution_mode="generate", output_dir=tmp_path, num_steps=32),
         progress=messages.append,
     )
 
     assert any(message.startswith("SAMPLING_PATCH 0/") and "euler sampler starting" in message for message in messages)
     assert any(" 32/32: euler sampler" in message for message in messages)
     assert any(message.startswith("SAMPLING_PATCH ") and "euler sampler finished" in message for message in messages)
+
+
+def test_synthesize_reports_fallback_sampler_progress(monkeypatch, tmp_path: Path) -> None:
+    original_generate = FakeRuntime.generate
+
+    def slow_generate(self, **kwargs):
+        time.sleep(0.65)
+        return original_generate(self, **kwargs)
+
+    monkeypatch.setattr(FakeRuntime, "generate", slow_generate)
+    messages: list[str] = []
+
+    DotsTtsService().synthesize(
+        SynthesisRequest(text="hello", execution_mode="generate", output_dir=tmp_path, num_steps=4),
+        progress=messages.append,
+    )
+
+    assert any(" 1/4: euler sampler running" in message for message in messages)
+    assert messages[-1].startswith("STEP 6/6: Done")
+
+
+def test_audio_patch_estimate_is_conservative_for_long_text() -> None:
+    short = _estimate_audio_patch_total(FakeRuntime(), SynthesisRequest(text="hello world"))
+    long = _estimate_audio_patch_total(
+        FakeRuntime(),
+        SynthesisRequest(
+            text=(
+                "This is a longer sentence with punctuation, pauses, and enough words to require "
+                "a larger number of estimated audio patches."
+            )
+        ),
+    )
+
+    assert short >= 20
+    assert long > short * 4
 
 
 def test_runtime_cache_reuses_matching_config(tmp_path: Path) -> None:

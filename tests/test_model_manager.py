@@ -17,11 +17,11 @@ from voice_clone_dot_tts.model_manager import (
 
 
 def test_repo_id_to_dir_name_is_path_safe() -> None:
-    assert repo_id_to_dir_name("rednote-hilab/dots.tts-soar") == "rednote-hilab__dots.tts-soar"
+    assert repo_id_to_dir_name("rednote-hilab/dots.tts-mf") == "rednote-hilab__dots.tts-mf"
 
 
 def test_local_model_path_uses_configured_model_dir(tmp_path: Path) -> None:
-    assert local_model_path(DEFAULT_MODEL, model_dir=tmp_path) == (tmp_path / "rednote-hilab__dots.tts-soar")
+    assert local_model_path(DEFAULT_MODEL, model_dir=tmp_path) == (tmp_path / "rednote-hilab__dots.tts-mf")
 
 
 def test_is_model_downloaded_requires_config_file(tmp_path: Path) -> None:
@@ -76,7 +76,7 @@ def test_normalize_mlx_variant_defaults_to_int4() -> None:
 def test_list_managed_models_reports_known_models(tmp_path: Path) -> None:
     models = list_managed_models(model_dir=tmp_path)
 
-    assert [model.repo_id for model in models] == ["rednote-hilab/dots.tts-soar"]
+    assert [model.repo_id for model in models] == ["rednote-hilab/dots.tts-mf", "rednote-hilab/dots.tts-soar"]
     assert all(str(tmp_path) in str(model.local_path) for model in models)
 
 

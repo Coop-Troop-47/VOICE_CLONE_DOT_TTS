@@ -5,7 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QScrollArea, QToolButton
+from PySide6.QtWidgets import QApplication, QProgressBar, QScrollArea, QSlider, QToolButton
 
 from voice_clone_dot_tts.constants import DEFAULT_MODEL
 from voice_clone_dot_tts.ui import MainWindow
@@ -40,7 +40,7 @@ def _make_valid_mlx_model_dir(path: Path) -> Path:
     return path
 
 
-def test_ui_defaults_to_fixed_downloaded_soar_model(monkeypatch, tmp_path: Path) -> None:
+def test_ui_defaults_to_fixed_downloaded_pytorch_model(monkeypatch, tmp_path: Path) -> None:
     _app()
     fixed_path = _make_valid_model_dir(tmp_path / "rednote-hilab__dots.tts-soar")
     monkeypatch.setattr("voice_clone_dot_tts.ui.local_model_path", lambda repo_id: fixed_path)
@@ -165,6 +165,7 @@ def test_ui_exposes_pytorch_torchao_quantization(monkeypatch, tmp_path: Path) ->
     window = MainWindow()
     try:
         assert window.backend_combo.currentData() == "pytorch"
+        assert window.quantization_combo.isEnabled()
         assert window.quantization_combo.findData("torchao-int8wo") >= 0
         assert window.quantization_combo.findData("torchao-int4wo") >= 0
 
@@ -172,6 +173,75 @@ def test_ui_exposes_pytorch_torchao_quantization(monkeypatch, tmp_path: Path) ->
         request = window._build_request()
 
         assert request.runtime.quantization == "torchao-int8wo"
+    finally:
+        window.close()
+
+
+def test_ui_generation_failure_resets_progress(monkeypatch, tmp_path: Path) -> None:
+    _app()
+    fixed_path = _make_valid_model_dir(tmp_path / "rednote-hilab__dots.tts-mf")
+    monkeypatch.setattr("voice_clone_dot_tts.ui.local_model_path", lambda repo_id: fixed_path)
+    monkeypatch.setattr("PySide6.QtWidgets.QMessageBox.exec", lambda self: None)
+
+    window = MainWindow()
+    try:
+        window._set_step_counter(4, 6, "Generating audio")
+        window._set_sampler_counter(12, 32, "euler sampler", patch_current=1, patch_total=2)
+
+        window._generation_failed("simulated failure")
+
+        assert window.step_counter_label.text() == "Step 0/6: Error: simulated failure"
+        assert window.step_progress.value() == 0
+        assert window.sampler_counter_label.text() == "Sampler 0/8: Stopped after error"
+        assert window.sampler_progress.value() == 0
+        assert window.eta_label.text() == "ETA: stopped after error"
+        assert window.status_label.text() == "Failed"
+    finally:
+        window.close()
+
+
+def test_ui_download_progress_bar_tracks_download_messages(monkeypatch, tmp_path: Path) -> None:
+    _app()
+    fixed_path = _make_valid_model_dir(tmp_path / "rednote-hilab__dots.tts-mf")
+    monkeypatch.setattr("voice_clone_dot_tts.ui.local_model_path", lambda repo_id: fixed_path)
+
+    window = MainWindow()
+    try:
+        assert isinstance(window.download_progress_bar, QProgressBar)
+        assert window.download_progress_label.text() == "Download: idle"
+
+        window._download_progress("Downloading rednote-hilab/dots.tts-mf to local folder")
+
+        assert window.download_progress_bar.minimum() == 0
+        assert window.download_progress_bar.maximum() == 0
+        assert "Downloading" in window.download_progress_label.text()
+
+        window._model_download_succeeded(str(fixed_path))
+
+        assert window.download_progress_bar.maximum() == 100
+        assert window.download_progress_bar.value() == 100
+        assert window.download_progress_label.text() == "Download complete"
+    finally:
+        window.close()
+
+
+def test_ui_audio_scrubbers_track_reference_and_generated_files(monkeypatch, tmp_path: Path) -> None:
+    _app()
+    fixed_path = _make_valid_model_dir(tmp_path / "rednote-hilab__dots.tts-mf")
+    monkeypatch.setattr("voice_clone_dot_tts.ui.local_model_path", lambda repo_id: fixed_path)
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF....WAVEfmt ")
+
+    window = MainWindow()
+    try:
+        sliders = window.findChildren(QSlider)
+        assert len(sliders) >= 2
+
+        window.prompt_audio_edit.setText(str(audio_path))
+        assert window.prompt_audio_player.play_button.isEnabled()
+
+        window.generated_audio_player.set_source(audio_path)
+        assert window.generated_audio_player.play_button.isEnabled()
     finally:
         window.close()
 
@@ -195,6 +265,8 @@ def test_ui_has_visible_help_for_options(monkeypatch, tmp_path: Path) -> None:
         assert window.prompt_audio_edit.toolTip()
         assert window.text_edit.toolTip()
         assert window.generate_button.toolTip()
+        assert "More info:" in help_buttons[0].toolTip()
+        assert len(window.quantization_combo.toolTip()) > 250
     finally:
         window.close()
 
@@ -233,7 +305,7 @@ def test_ui_guide_tab_and_menu_action(monkeypatch, tmp_path: Path) -> None:
     window = MainWindow()
     try:
         assert window.tabs.indexOf(window.guide_edit) >= 0
-        assert "rednote-hilab/dots.tts-soar" in window.guide_edit.toPlainText()
+        assert "MeanFlow" in window.guide_edit.toPlainText()
 
         window.tabs.setCurrentWidget(window.log_edit)
         window._open_guide()
